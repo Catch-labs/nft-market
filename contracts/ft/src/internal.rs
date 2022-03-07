@@ -1,18 +1,34 @@
 use crate::*;
 
+macro_rules! require {
+    ( $a:expr, $b:expr,$c:expr) => {
+        if $a != $b {
+            env::panic($c);
+        }
+    };
+}
+
+macro_rules! require_ne {
+    ( $a:expr, $b:expr,$c:expr) => {
+        if $a == $b {
+            env::panic($c);
+        }
+    };
+}
+
 pub(crate) fn assert_one_yocto() {
-    assert_eq!(
+    require!(
         env::attached_deposit(),
         1,
-        "Requires attached deposit of exactly 1 yoctoNEAR"
-    )
+        b"Requires attached deposit of exactly 1 yoctoNEAR"
+    );
 }
 
 pub(crate) fn assert_self() {
-    assert_eq!(
+    require!(
         env::predecessor_account_id(),
         env::current_account_id(),
-        "Method is private"
+        b"Method is private"
     );
 }
 
@@ -48,9 +64,10 @@ impl Contract {
         amount: Balance,
         memo: Option<String>,
     ) {
-        assert_ne!(
-            sender_id, receiver_id,
-            "Sender and receiver should be different"
+        require_ne!(
+            sender_id,
+            receiver_id,
+            b"Sender and receiver should be different"
         );
         self.internal_withdraw(sender_id, amount);
         self.internal_deposit(receiver_id, amount);
@@ -58,5 +75,13 @@ impl Contract {
         if let Some(memo) = memo {
             env::log(format!("Memo: {}", memo).as_bytes());
         }
+    }
+
+    pub(crate) fn assert_owner(&self) {
+        require!(
+            env::predecessor_account_id(),
+            self.owner_id,
+            b"It is a owner only method"
+        );
     }
 }
