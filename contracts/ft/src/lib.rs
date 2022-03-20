@@ -10,9 +10,9 @@
 * internal.rs contains internal methods for fungible token.
 */
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::collections::LookupMap;
+use near_sdk::collections::{LazyOption, LookupMap};
 use near_sdk::json_types::{ValidAccountId, U128};
-use near_sdk::{env, near_bindgen, AccountId, Balance, Promise, StorageUsage};
+use near_sdk::{env, near_bindgen, AccountId, Balance, PanicOnDefault, Promise, StorageUsage};
 
 pub use crate::fungible_token_core::*;
 pub use crate::fungible_token_metadata::*;
@@ -30,7 +30,7 @@ mod storage_manager;
 static ALLOC: near_sdk::wee_alloc::WeeAlloc<'_> = near_sdk::wee_alloc::WeeAlloc::INIT;
 
 #[near_bindgen]
-#[derive(BorshDeserialize, BorshSerialize)]
+#[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct Contract {
     pub owner_id: AccountId,
 
@@ -43,13 +43,7 @@ pub struct Contract {
     /// The storage size in bytes for one account.
     pub account_storage_usage: StorageUsage,
 
-    pub ft_metadata: FungibleTokenMetadata,
-}
-
-impl Default for Contract {
-    fn default() -> Self {
-        env::panic(b"Contract is not initialized");
-    }
+    pub ft_metadata: LazyOption<FungibleTokenMetadata>,
 }
 
 #[near_bindgen]
@@ -65,7 +59,7 @@ impl Contract {
         reference_hash: String,
         decimals: u8,
     ) -> Self {
-        assert!(!env::state_exists(), "Already initialized");
+        require!(!env::state_exists(), "Already initialized");
 
         let ref_hash_result: Result<Vec<u8>, ParseIntError> = (0..reference_hash.len())
             .step_by(2)
@@ -80,14 +74,17 @@ impl Contract {
             accounts: LookupMap::new(b"a".to_vec()),
             total_supply: total_supply.into(),
             account_storage_usage: 0,
-            ft_metadata: FungibleTokenMetadata {
-                version,
-                name,
-                symbol,
-                reference,
-                reference_hash: ref_hash_fixed_bytes,
-                decimals,
-            },
+            ft_metadata: LazyOption::new(
+                b"m".to_vec(),
+                Some(&FungibleTokenMetadata {
+                    version,
+                    name,
+                    symbol,
+                    reference,
+                    reference_hash: ref_hash_fixed_bytes,
+                    decimals,
+                }),
+            ),
         };
 
         // Determine cost of insertion into LookupMap
@@ -108,10 +105,10 @@ impl Contract {
     /// Owner only methods
 
     pub fn mint(&mut self, amount: U128) {
+        self.assert_owner(); // Only owner can call
+
         let amount: Balance = amount.into();
         let owner_id = self.owner_id.clone();
-
-        self.assert_owner(); // Only owner can call
 
         if let Some(new_total_supply) = self.total_supply.checked_add(amount) {
             self.total_supply = new_total_supply;
@@ -120,6 +117,28 @@ impl Contract {
         }
 
         self.internal_deposit(&owner_id, amount);
+
+        // ToDo - Mint Event
+    }
+
+    pub fn ft_transfer_player_reward(
+        &mut self,
+        player_id: ValidAccountId,
+        amount: U128,
+        feat: Option<String>,
+    ) {
+        self.assert_owner();
+        let amount: Balance = amount.into();
+
+        require!(amount > 0, "The amount should be a positive number");
+
+        let owner_id = self.owner_id.clone();
+        let player_id: AccountId = player_id.into();
+
+        self.internal_withdraw(&owner_id, amount);
+        self.internal_deposit(&player_id, amount);
+
+        // ToDo - Transfer Reward Event
     }
 }
 
@@ -169,11 +188,8 @@ mod fungible_token_tests {
         }
     }
 
-    #[test]
-    fn contract_creation_with_new() {
-        testing_env!(get_context(dex().as_ref().to_string()));
-
-        let contract = Contract::new(
+    fn create_contract() -> Contract {
+        Contract::new(
             dex(),
             U128::from(1_000_000_000_000_000),
             String::from("0.1.0"),
@@ -182,7 +198,14 @@ mod fungible_token_tests {
             String::from("https://github.com/near/core-contracts/tree/master/w-near-141"),
             "7c879fa7b49901d0ecc6ff5d64d7f673da5e4a5eb52a8d50a214175760d8919a".to_string(),
             24,
-        );
+        )
+    }
+
+    #[test]
+    fn contract_creation_with_new() {
+        testing_env!(get_context(dex().as_ref().to_string()));
+
+        let contract = create_contract();
 
         assert_eq!(contract.ft_total_supply().0, 1_000_000_000_000_000);
         assert_eq!(contract.ft_balance_of(alice()).0, ZERO_U128);
@@ -195,7 +218,7 @@ mod fungible_token_tests {
     }
 
     #[test]
-    #[should_panic(expected = "Contract is not initialized")]
+    #[should_panic(expected = "The contract is not initialized")]
     fn default_fails() {
         testing_env!(get_context(carol().into()));
         let _contract = Contract::default();
@@ -205,17 +228,7 @@ mod fungible_token_tests {
     fn test_mint_success() {
         testing_env!(get_context(dex().as_ref().to_string()));
 
-        let mut contract = Contract::new(
-            dex(),
-            U128::from(1_000_000_000_000_000),
-            String::from("0.1.0"),
-            String::from("NEAR Test Token"),
-            String::from("TEST"),
-            String::from("https://github.com/near/core-contracts/tree/master/w-near-141"),
-            "7c879fa7b49901d0ecc6ff5d64d7f673da5e4a5eb52a8d50a214175760d8919a".to_string(),
-            24,
-        );
-
+        let mut contract = create_contract();
         contract.mint(U128::from(5));
 
         assert_eq!(contract.ft_total_supply().0, 1_000_000_000_000_005);
@@ -228,21 +241,8 @@ mod fungible_token_tests {
     #[test]
     #[should_panic(expected = "It is a owner only method")]
     fn test_mint_fail() {
-        testing_env!(get_context(dex().as_ref().to_string()));
-
-        let mut contract = Contract::new(
-            dex(),
-            U128::from(1_000_000_000_000_000),
-            String::from("0.1.0"),
-            String::from("NEAR Test Token"),
-            String::from("TEST"),
-            String::from("https://github.com/near/core-contracts/tree/master/w-near-141"),
-            "7c879fa7b49901d0ecc6ff5d64d7f673da5e4a5eb52a8d50a214175760d8919a".to_string(),
-            24,
-        );
-
         testing_env!(get_context(alice().as_ref().to_string()));
-
+        let mut contract = create_contract();
         contract.mint(U128::from(5));
     }
 }
