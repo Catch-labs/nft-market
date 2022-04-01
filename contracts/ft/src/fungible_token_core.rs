@@ -104,9 +104,11 @@ trait FungibleTokenResolver {
 impl FungibleTokenCore for Contract {
     #[payable]
     fn ft_transfer(&mut self, receiver_id: ValidAccountId, amount: U128, memo: Option<String>) {
-        let sender_id = env::predecessor_account_id();
         assert_one_yocto();
-        let amount = amount.into();
+
+        let sender_id = env::predecessor_account_id();
+        let amount: Balance = amount.into();
+
         self.internal_transfer(&sender_id, receiver_id.as_ref(), amount, memo);
     }
 
@@ -119,10 +121,18 @@ impl FungibleTokenCore for Contract {
         memo: Option<String>,
     ) -> Promise {
         assert_one_yocto();
+        require!(
+            env::prepaid_gas() > GAS_FOR_FT_TRANSFER_CALL + GAS_FOR_RESOLVE_TRANSFER,
+            "More gas is required"
+        );
+
         let sender_id = env::predecessor_account_id();
-        let amount = amount.into();
+        let amount: Balance = amount.into();
+
         self.internal_transfer(&sender_id, receiver_id.as_ref(), amount, memo);
+
         // Initiating receiver's call and the callback
+
         ext_fungible_token_receiver::ft_on_transfer(
             sender_id.clone(),
             amount.into(),
@@ -158,10 +168,12 @@ impl FungibleTokenResolver for Contract {
         receiver_id: AccountId,
         amount: U128,
     ) -> U128 {
-        assert_self();
+        assert_self(); // Private Function
+
         let amount: Balance = amount.into();
 
         // Get the unused amount from the `ft_on_transfer` call result.
+
         let unused_amount = match env::promise_result(0) {
             PromiseResult::NotReady => unreachable!(),
             PromiseResult::Successful(value) => {
@@ -176,14 +188,17 @@ impl FungibleTokenResolver for Contract {
 
         if unused_amount > 0 {
             let receiver_balance = self.accounts.get(&receiver_id).unwrap_or(0);
+
             if receiver_balance > 0 {
                 let refund_amount = std::cmp::min(receiver_balance, unused_amount);
+
                 self.accounts
                     .insert(&receiver_id, &(receiver_balance - refund_amount));
 
                 if let Some(sender_balance) = self.accounts.get(&sender_id) {
                     self.accounts
                         .insert(&sender_id, &(sender_balance + refund_amount));
+
                     env::log(
                         format!(
                             "Refund {} from {} to {}",
@@ -195,8 +210,8 @@ impl FungibleTokenResolver for Contract {
                 } else {
                     // Sender's account was deleted, so we need to burn tokens.
                     self.total_supply -= refund_amount;
-                    env::log(b"The account of the sender was deleted");
-                    env::log(format!("Burn {}", refund_amount).as_bytes());
+
+                    // TODO : Burn Event
                 }
             }
         }
